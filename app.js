@@ -19,6 +19,46 @@ const STATUS = {
 };
 const LOCAL_KEY='oc-tracker-demo-v1';
 const FAV_KEY='oc-tracker-favorites-v1';
+const NOTIFY_KEY='oc-tracker-notifications-enabled-v1';
+const notificationSnapshots=new Map();
+const recentlyNotified=new Map();
+let notificationHistory=[];
+function onIncomingReports(next,day){
+ const prev=notificationSnapshots.get(day);
+ notificationSnapshots.set(day,new Set(next.map(e=>e.source+':'+e.id)));
+ if(!prev||!state.notificationsEnabled)return;
+ const now=Date.now();
+ const matches=next.filter(e=>e.source==='cast'&&e.status==='seen'&&!prev.has(e.source+':'+e.id)&&state.favorite.includes(e.cast)&&Math.abs(now-new Date(e.created_at).getTime())<5*60000)
+ .sort((a,b)=>new Date(a.created_at)-new Date(b.created_at));
+ for(const event of matches){
+   const key=[day,event.area,event.cast].join(':');
+   if(now-(recentlyNotified.get(key)||0)<20*60000)continue;
+   recentlyNotified.set(key,now);
+   const name=castName(event.cast);
+   const where=AREAS.find(a=>a.code===event.area)?.name||event.area;
+   const message=name+' が '+where+' に登場したとの報告がありました';
+   notificationHistory.unshift({text:message,time:now,area:event.area});
+   notificationHistory=notificationHistory.slice(0,10);
+   toast('🔔 '+message);
+   if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
+     const payload={body:where+' · 来場者からの登場報告',tag:'oc-'+key,icon:'./assets/favicon.svg',data:{url:location.href}};
+     if('serviceWorker' in navigator)navigator.serviceWorker.ready.then(reg=>reg.showNotification('🔔 '+name+' の登場情報',payload)).catch(()=>{});
+     else try{new Notification('🔔 '+name+' の登場情報',payload)}catch{}
+   }
+ }
+}
+async function toggleFavoriteNotifications(){
+ state.notificationsEnabled=!state.notificationsEnabled;
+ localStorage.setItem(NOTIFY_KEY,JSON.stringify(state.notificationsEnabled));
+ if(state.notificationsEnabled&&'Notification' in window&&Notification.permission==='default'){
+   try{await Notification.requestPermission()}catch{}
+ }
+ render();
+ toast(state.notificationsEnabled?'お気に入りの新着登場報告を通知します（アプリ起動中）':'登場通知をオフにしました');
+}
+function notificationSettingsPanel(){
+ return '<div class="section-card" style="margin-bottom:12px"><div class="section-heading"><h2>🔔 推しの登場通知</h2><button class="btn '+(state.notificationsEnabled?'green':'ghost')+'" data-action="toggle-notifications">'+(state.notificationsEnabled?'ON・通知停止':'通知をON')+'</button></div><p class="hint">★を付けたキャストの新しい「登場」報告を、アプリを開いている間にお知らせします。重複報告は20分間まとめます。iPhoneでアプリを閉じた状態へのプッシュ通知は未対応です。</p>'+(notificationHistory.length?'<div class="notice">最近の通知：'+escapeHtml(notificationHistory[0].text)+'</div>':'')+'</div>';
+}
 const getLocal=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}};
 const todayJst=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -38,7 +78,7 @@ function initialRecords(){
  ];
 }
 if(!Array.isArray(records)) records=liveRequested?[]:initialRecords();
-const state={tab:'map',day:DAYS.includes(todayJst())?todayJst():DAYS[0],selected:'photo-a',filter:'all',category:'all',castSearch:'',draftCast:'wilnas',favorite:getLocal(FAV_KEY,[]),zoom:1,posting:false};
+const state={tab:'map',day:DAYS.includes(todayJst())?todayJst():DAYS[0],selected:'photo-a',filter:'all',category:'all',castSearch:'',draftCast:'wilnas',favorite:getLocal(FAV_KEY,[]),zoom:1,posting:false,notificationsEnabled:getLocal(NOTIFY_KEY,false)};
 function toast(message){const el=document.getElementById('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),3000)}
 function diffMinutes(iso){return Math.max(0,Math.floor((Date.now()-new Date(iso).getTime())/60000))}
 function ageLabel(iso){if(!iso)return '報告なし';const n=diffMinutes(iso);if(n<1)return 'たった今';if(n<60)return `${n}分前`;return `${Math.floor(n/60)}時間前`}
@@ -74,7 +114,7 @@ function detailPanel(){const p=areaState(state.selected);if(!p)return '';
  return `<div class="section-heading"><h2>${escapeHtml(p.area.name)}</h2>${pill(p.status,p.stale)}</div><div class="small">最終報告：${ageLabel(p.lastAt)}${p.rounds?` · 第${p.rounds}回（仮の番号）`:''}</div>${stage?`<div class="notice">ステージ出演は待機列と別管理。公式の出演予定は、公開情報の登録後に表示します。</div><h3 style="font-size:.92rem;margin:17px 0 6px">登場キャスト (${p.casts.length}人)</h3>${shown?`<div class="cast-chips">${shown}</div>`:'<div class="empty">キャスト情報はまだありません</div>'}<div class="divider"></div><div class="form-label">出演キャストを報告</div><div class="form-group"><label class="form-label" for="cast-category">カテゴリ</label><select id="cast-category" class="field" style="width:100%">${CATEGORIES.filter(c=>c.slug==='all'||CASTS.some(x=>x.categories.includes(c.slug))).map(c=>`<option value="${c.slug}" ${state.category===c.slug?'selected':''}>${c.name}</option>`).join('')}</select></div><div class="inline"><select id="cast-pick" class="field" aria-label="報告するキャスト">${CASTS.filter(c=>state.category==='all'||c.categories.includes(state.category)).map(c=>`<option value="${c.slug}" ${state.draftCast===c.slug?'selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select></div><div class="split-buttons" style="margin-top:9px"><button class="btn primary" data-report="cast:seen">登場を報告</button><button class="btn" data-report="cast:still">まだいる</button><button class="btn ghost" data-report="cast:left">離れた</button></div>`:`<h3 style="font-size:.92rem;margin:17px 0 6px">登場キャスト (${p.casts.length}人)</h3>${shown?`<div class="cast-chips">${shown}</div>`:'<div class="empty">キャスト情報はまだありません</div>'}${p.stale?'<p class="notice warn">最後の列状況報告から10分以上経過。現在の状況は要再確認です。</p>':''}<div class="divider"></div><div class="form-label">① 待機列の状態を報告</div><div class="split-buttons"><button class="btn green" data-report="queue:open">列形成開始</button><button class="btn gold" data-report="queue:closed">列締切</button><button class="btn" data-report="queue:done">撮影終了</button></div><div class="divider"></div><div class="form-label">② 登場キャストを報告</div><div class="form-group"><label class="form-label" for="cast-category">カテゴリ</label><select id="cast-category" class="field" style="width:100%">${CATEGORIES.filter(c=>c.slug==='all'||CASTS.some(x=>x.categories.includes(c.slug))).map(c=>`<option value="${c.slug}" ${state.category===c.slug?'selected':''}>${c.name}</option>`).join('')}</select></div><div class="inline"><select id="cast-pick" class="field" aria-label="報告するキャスト">${CASTS.filter(c=>state.category==='all'||c.categories.includes(state.category)).map(c=>`<option value="${c.slug}" ${state.draftCast===c.slug?'selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select></div><div class="split-buttons" style="margin-top:9px"><button class="btn primary" data-report="cast:seen">登場を報告</button><button class="btn" data-report="cast:still">まだいる</button><button class="btn ghost" data-report="cast:left">離れた</button></div><p class="hint">キャスト報告と列状況の報告は独立しています。キャスト未判明でも列形成を報告できます。</p>`}
  ${stage?`<div class="divider"></div><div class="form-label">ステージ出演状況を報告</div><div class="split-buttons"><button class="btn green" data-report="stage:started">出演開始</button><button class="btn" data-report="stage:ended">出演終了</button></div>`:''}
  <div class="notice" style="margin-top:14px">${mode==='demo'?'デモ操作はこの端末内にだけ保存され、他の利用者には共有されません。':'投稿は他の閲覧者にも共有されます。公開エリアで直接確認した情報だけを報告してください。'}</div>`}
-function rosterView(){const list=CASTS.filter(c=>(state.category==='all'||c.categories.includes(state.category))&&c.name.includes(state.castSearch));return `<h2 class="page-title">キャスト一覧</h2><p class="hint">十二神将・六竜などカテゴリで絞り込み。★をつけるとマップ上で登場スポットを探しやすくなります。</p><input class="field search" id="cast-search" placeholder="キャスト名で検索" value="${escapeHtml(state.castSearch)}" aria-label="キャスト検索"><div class="category-grid">${CATEGORIES.map(c=>`<button data-category="${c.slug}" class="${c.slug===state.category?'active':''}">${c.name}</button>`).join('')}</div><div class="roster">${list.length?list.map(c=>`<button class="roster-item" data-favorite="${c.slug}" aria-label="${escapeHtml(c.name)}をお気に入り切り替え"><span>${escapeHtml(c.name)}</span><span class="favorite">${state.favorite.includes(c.slug)?'★':'☆'}</span></button>`).join(''):'<div class="empty">該当するキャストがありません</div>'}</div><p class="footer-note">出演者マスターはサンプルです。正式なOC情報が確定したら、一覧と分類を更新します。</p>`}
+function rosterView(){const list=CASTS.filter(c=>(state.category==='all'||c.categories.includes(state.category))&&c.name.includes(state.castSearch));return `<h2 class="page-title">キャスト一覧</h2>`+notificationSettingsPanel()+`<p class="hint">十二神将・六竜などカテゴリで絞り込み。★をつけるとマップ上で登場スポットを探しやすくなります。</p><input class="field search" id="cast-search" placeholder="キャスト名で検索" value="${escapeHtml(state.castSearch)}" aria-label="キャスト検索"><div class="category-grid">${CATEGORIES.map(c=>`<button data-category="${c.slug}" class="${c.slug===state.category?'active':''}">${c.name}</button>`).join('')}</div><div class="roster">${list.length?list.map(c=>`<button class="roster-item" data-favorite="${c.slug}" aria-label="${escapeHtml(c.name)}をお気に入り切り替え"><span>${escapeHtml(c.name)}</span><span class="favorite">${state.favorite.includes(c.slug)?'★':'☆'}</span></button>`).join(''):'<div class="empty">該当するキャストがありません</div>'}</div><p class="footer-note">出演者マスターはサンプルです。正式なOC情報が確定したら、一覧と分類を更新します。</p>`}
 function stagesView(){const s=areaState('main-stage');return `<h2 class="page-title">ステージ</h2><div class="section-card"><div class="section-heading"><h2>メインステージ</h2>${pill(s.status)}</div><p class="hint">公式ステージ予定は未登録です。予定と当日報告は分けて表示します。</p><div class="notice">公式情報に掲載された出演予定を取り込み、出演開始・終了の目撃報告を追記する形式です。</div><div class="split-buttons" style="grid-template-columns:1fr 1fr;margin-top:13px"><button class="btn green" data-stage-report="started">出演開始を報告</button><button class="btn" data-stage-report="ended">出演終了を報告</button></div></div>`}
 function historyView(){const data=sorted(records.filter(x=>x.day===state.day)).reverse();const action=e=>e.source==='queue'?({'open':'列形成開始','closed':'列締切','done':'撮影終了'}[e.status]):e.source==='stage'?({'started':'出演開始','ended':'出演終了'}[e.status]):`${castName(e.cast)}：${({'seen':'登場','still':'引き続き登場','left':'離脱'}[e.status]||e.status)}`;return `<h2 class="page-title">報告履歴</h2><div class="section-card">${data.length?data.slice(0,100).map(e=>`<div class="list-row"><div><strong>${escapeHtml(action(e))}</strong><div class="small">${escapeHtml(AREAS.find(a=>a.code===e.area)?.name||e.area)} · ${ageLabel(e.created_at)}</div></div><div class="small">${escapeHtml(new Date(e.created_at).toLocaleTimeString('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit'}))}</div></div>`).join(''):'<div class="empty">まだ報告がありません</div>'}</div>${mode==='demo'?'<button class="btn ghost full" data-action="reset-demo">デモデータを初期化する</button>':''}`}
 function nav(){return `<nav class="nav" aria-label="メインメニュー">${[{tab:'map',icon:'▣',text:'マップ'},{tab:'casts',icon:'♧',text:'キャスト'},{tab:'stage',icon:'▤',text:'ステージ'},{tab:'history',icon:'◷',text:'報告履歴'}].map(t=>`<button data-tab="${t.tab}" class="${state.tab===t.tab?'active':''}"><span class="nav-icon">${t.icon}</span>${t.text}</button>`).join('')}</nav>`}
@@ -109,13 +149,13 @@ async function fetchReports(){if(!api)return;let next=[];for(const [table,source
   if((data||[]).length<1000)break;
   if(start===9000)throw new Error('報告数が上限を超えたため最新状態を確定できません');
  }
- }records=next;render();}
+ }onIncomingReports(next,state.day);records=next;render();}
 function subscribe(){if(channel&&api)api.removeChannel(channel);if(!api)return;
  channel=api.channel(`oc-tracker-${state.day}`);
  for(const table of ['queue_reports','cast_reports','stage_reports'])channel.on('postgres_changes',{event:'INSERT',schema:'public',table,filter:`day=eq.${state.day}`,select:table==='cast_reports'?['id','day','area_code','cast_slug','status','created_at']:['id','day','area_code','status','created_at']},()=>fetchReports().catch(e=>toast('再取得に失敗：'+e.message)));
  channel.subscribe(status=>{if(status==='CHANNEL_ERROR'||status==='TIMED_OUT')toast('ライブ接続が不安定です。再読込で更新してください')});
 }
-async function boot(){if(liveRequested){try{const {createClient}=await import('https://esm.sh/@supabase/supabase-js@2.58.0');api=createClient(config.supabaseUrl,config.supabasePublishableKey,{auth:{persistSession:true,autoRefreshToken:true}});await fetchReports();mode='live';loadError='';subscribe();}catch(e){mode='offline';api=null;records=[];loadError=`Supabase接続エラー：${e.message}。安全のため報告操作を停止しています。`;}}render()}
+async function boot(){if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{});if(liveRequested){try{const {createClient}=await import('https://esm.sh/@supabase/supabase-js@2.58.0');api=createClient(config.supabaseUrl,config.supabasePublishableKey,{auth:{persistSession:true,autoRefreshToken:true}});await fetchReports();mode='live';loadError='';subscribe();}catch(e){mode='offline';api=null;records=[];loadError=`Supabase接続エラー：${e.message}。安全のため報告操作を停止しています。`;}}render()}
 const app=document.getElementById('app');
 app.addEventListener('click',e=>{
  const b=e.target.closest('button');if(!b)return;
@@ -127,6 +167,7 @@ app.addEventListener('click',e=>{
  if(b.dataset.favorite){const c=b.dataset.favorite;state.favorite=state.favorite.includes(c)?state.favorite.filter(x=>x!==c):[...state.favorite,c];localStorage.setItem(FAV_KEY,JSON.stringify(state.favorite));render()}
  if(b.dataset.report){const [source,status]=b.dataset.report.split(':');sendReport(source,status)}
  if(b.dataset.stageReport){state.selected='main-stage';sendReport('stage',b.dataset.stageReport)}
+ if(b.dataset.action==='toggle-notifications')toggleFavoriteNotifications();
  if(b.dataset.action==='refresh'&&mode==='live'){fetchReports().then(()=>toast('最新の情報に更新しました')).catch(err=>toast('更新失敗：'+err.message))}
  if(b.dataset.action==='reset-demo'&&mode==='demo'){records=initialRecords();localStorage.setItem(LOCAL_KEY,JSON.stringify(records));render();toast('デモを初期化しました')}
 });
