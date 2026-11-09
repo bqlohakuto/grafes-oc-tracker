@@ -62,6 +62,102 @@ function notificationSettingsPanel(){
    :'<button class="btn green" data-action="push-enable" '+(state.pushBusy?'disabled':'')+'>プッシュ通知を登録</button>';
  return '<div class="section-card" style="margin-bottom:12px"><div class="section-heading"><h2>🔔 推しの登場通知</h2><button class="btn '+(state.notificationsEnabled?'green':'ghost')+'" data-action="toggle-notifications">'+(state.notificationsEnabled?'画面内ON':'画面内OFF')+'</button></div><p class="hint">★を付けたキャストの新しい「登場」報告をお知らせします。通知が重ならないよう同じキャスト・場所は20分間まとめます。</p><p class="hint">'+escapeHtml(pushSettingsText())+'</p>'+pushButton+'<p class="hint">iPhoneでアプリを閉じていても通知するには、Safariの共有からホーム画面に追加し、追加したOC TRACKERを開いて通知を許可してください。</p>'+(notificationHistory.length?'<div class="notice">最近の通知：'+escapeHtml(notificationHistory[0].text)+'</div>':'')+'</div>';
 }
+
+function urlBase64ToUint8Array(s){const padded=(s+'='.repeat((4-s.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/');return Uint8Array.from(atob(padded),c=>c.charCodeAt(0))}
+async function ensurePushUser(){
+ if(!api)throw new Error('Supabaseに接続されていません');
+ const {data:{session},error}=await api.auth.getSession();if(error)throw error;
+ if(session?.user)return {user:session.user,token:session.access_token};
+ const result=await api.auth.signInAnonymously();if(result.error)throw result.error;
+ if(!result.data.user||!result.data.session)throw new Error('匿名ログインに失敗しました');
+ return {user:result.data.user,token:result.data.session.access_token};
+}
+async function syncFavoritesForPush(user){
+ const {data,error}=await api.from('oc_favorites').select('cast_slug').eq('user_id',user.id);if(error)throw error;
+ const saved=new Set((data||[]).map(r=>r.cast_slug));
+ const add=state.favorite.filter(c=>!saved.has(c)),del=[...saved].filter(c=>!state.favorite.includes(c));
+ if(add.length){const r=await api.from('oc_favorites').insert(add.map(cast_slug=>({user_id:user.id,cast_slug})));if(r.error)throw r.error}
+ if(del.length){const r=await api.from('oc_favorites').delete().eq('user_id',user.id).in('cast_slug',del);if(r.error)throw r.error}
+}
+async function syncFavoriteForPush(slug,added){
+ if(!api||state.pushStatus!=='on')return;
+ try{
+  const {user}=await ensurePushUser();
+  const r=added?await api.from('oc_favorites').upsert({user_id:user.id,cast_slug:slug}):await api.from('oc_favorites').delete().eq('user_id',user.id).eq('cast_slug',slug);
+  if(r.error)throw r.error;
+ }catch(e){toast('推し通知の同期失敗：'+(e?.message||e))}
+}
+async function refreshPushStatus(){
+ try{
+  if(!api||!('serviceWorker' in navigator)||!('PushManager' in window)){state.pushStatus='unsupported';return}
+  const reg=await navigator.serviceWorker.ready;
+  const sub=await reg.pushManager.getSubscription();
+  if(!sub){state.pushStatus='off';return}
+  const {data:{session}}=await api.auth.getSession();
+  if(!session?.user){state.pushStatus='off';return}
+  const {data,error}=await api.from('oc_push_subscriptions').select('endpoint').eq('user_id',session.user.id).eq('endpoint',sub.endpoint).eq('test_only',TEST_MODE).maybeSingle();
+  if(error)throw error;
+  state.pushStatus=data?'on':'off';
+ }catch{state.pushStatus='off'}finally{render()}
+}
+async function enablePush(){
+ if(state.pushBusy)return;
+ if(mode!=='live'||!api){toast('LIVE接続後に登録してください');return}
+ if(!('Notification' in window)||!('serviceWorker' in navigator)||!('PushManager' in window)){toast('このブラウザはプッシュ通知に非対応です');return}
+ const iphone=/iPad|iPhone|iPod/.test(navigator.userAgent);
+ if(iphone&&!(navigator.standalone===true||window.matchMedia('(display-mode: standalone)').matches)){
+  toast('iPhoneではSafariからホーム画面に追加したアプリを開いてください');return;
+ }
+ // On iOS the permission request must run directly in the click handler.
+ try{
+  const permission=Notification.permission==='default'?await Notification.requestPermission():Notification.permission;
+  if(permission!=='granted'){toast('通知の許可が必要です');return}
+ }catch(e){toast('通知の許可に失敗：'+(e?.message||e));return}
+ state.pushBusy=true;state.pushStatus='working';render();
+ try{
+  const {user,token}=await ensurePushUser();
+  const resp=await fetch(config.supabaseUrl+'/functions/v1/oc-push',{method:'GET',headers:{authorization:'Bearer '+token,apikey:config.supabasePublishableKey}});
+  if(!resp.ok)throw new Error('通知サーバー HTTP '+resp.status);
+  const details=await resp.json();if(!details.publicKey)throw new Error('通知用公開鍵がありません');
+  const reg=await navigator.serviceWorker.ready;
+  let sub=await reg.pushManager.getSubscription();
+  if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlBase64ToUint8Array(details.publicKey)});
+  const json=sub.toJSON();
+  if(!json.keys?.p256dh||!json.keys?.auth)throw new Error('購読情報が取得できません');
+  const {error}=await api.from('oc_push_subscriptions').upsert({
+   endpoint:sub.endpoint,user_id:user.id,p256dh:json.keys.p256dh,auth_key:json.keys.auth,
+   enabled:true,test_only:TEST_MODE,updated_at:new Date().toISOString()
+  },{onConflict:'endpoint'});
+  if(error)throw error;
+  state.pushStatus='on';state.notificationsEnabled=true;localStorage.setItem(NOTIFY_KEY,'true');
+  try{await syncFavoritesForPush(user)}catch(e){toast('登録は完了。★の同期失敗：'+(e?.message||e))}
+  toast('プッシュ通知の登録が完了しました');
+ }catch(e){state.pushStatus='off';toast('プッシュ通知の登録失敗：'+(e?.message||e))}
+ finally{state.pushBusy=false;render()}
+}
+async function disablePush(){
+ if(state.pushBusy||!api)return;
+ state.pushBusy=true;render();
+ try{
+  const reg=await navigator.serviceWorker.ready,sub=await reg.pushManager.getSubscription();
+  if(sub){
+   const {user}=await ensurePushUser();
+   const {error}=await api.from('oc_push_subscriptions').delete().eq('endpoint',sub.endpoint).eq('user_id',user.id);
+   if(error)throw error;
+   await sub.unsubscribe();
+  }
+  state.pushStatus='off';toast('プッシュ通知を解除しました');
+ }catch(e){toast('通知解除の失敗：'+(e?.message||e))}
+ finally{state.pushBusy=false;render()}
+}
+function pushSettingsText(){
+ if(state.pushStatus==='on')return 'プッシュ通知：登録済み'+(TEST_MODE?'（テスト用）':'');
+ if(state.pushStatus==='working')return 'プッシュ通知：登録処理中';
+ if(state.pushStatus==='unsupported')return 'プッシュ通知に非対応の端末です';
+ if(state.pushStatus==='checking')return 'プッシュ通知の登録を確認中';
+ return 'プッシュ通知：未登録';
+}
+
 const getLocal=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}};
 const todayJst=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
