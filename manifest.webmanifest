@@ -1,0 +1,19 @@
+{
+  "id": "./",
+  "name": "グラフェス2026 OC TRACKER",
+  "short_name": "OC TRACKER",
+  "description": "非公式ファン制作のOC登場状況共有アプリ",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#151a31",
+  "theme_color": "#151a31",
+  "icons": [
+    {
+      "src": "./assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
