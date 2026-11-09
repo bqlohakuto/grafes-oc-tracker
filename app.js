@@ -40,7 +40,7 @@ function onIncomingReports(next,day){
    notificationHistory.unshift({text:message,time:now,area:event.area});
    notificationHistory=notificationHistory.slice(0,10);
    toast('🔔 '+message);
-   if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
+   if(state.pushStatus!=='on'&&typeof Notification!=='undefined'&&Notification.permission==='granted'){
      const payload={body:where+' · 来場者からの登場報告',tag:'oc-'+key,icon:'./assets/favicon.svg',data:{url:location.href}};
      if('serviceWorker' in navigator)navigator.serviceWorker.ready.then(reg=>reg.showNotification('🔔 '+name+' の登場情報',payload)).catch(()=>{});
      else try{new Notification('🔔 '+name+' の登場情報',payload)}catch{}
@@ -57,7 +57,10 @@ async function toggleFavoriteNotifications(){
  toast(state.notificationsEnabled?'お気に入りの新着登場報告を通知します（アプリ起動中）':'登場通知をオフにしました');
 }
 function notificationSettingsPanel(){
- return '<div class="section-card" style="margin-bottom:12px"><div class="section-heading"><h2>🔔 推しの登場通知</h2><button class="btn '+(state.notificationsEnabled?'green':'ghost')+'" data-action="toggle-notifications">'+(state.notificationsEnabled?'ON・通知停止':'通知をON')+'</button></div><p class="hint">★を付けたキャストの新しい「登場」報告を、アプリを開いている間にお知らせします。重複報告は20分間まとめます。iPhoneでアプリを閉じた状態へのプッシュ通知は未対応です。</p>'+(notificationHistory.length?'<div class="notice">最近の通知：'+escapeHtml(notificationHistory[0].text)+'</div>':'')+'</div>';
+ const pushButton=state.pushStatus==='on'
+   ?'<button class="btn ghost" data-action="push-disable" '+(state.pushBusy?'disabled':'')+'>プッシュ通知を解除</button>'
+   :'<button class="btn green" data-action="push-enable" '+(state.pushBusy?'disabled':'')+'>プッシュ通知を登録</button>';
+ return '<div class="section-card" style="margin-bottom:12px"><div class="section-heading"><h2>🔔 推しの登場通知</h2><button class="btn '+(state.notificationsEnabled?'green':'ghost')+'" data-action="toggle-notifications">'+(state.notificationsEnabled?'画面内ON':'画面内OFF')+'</button></div><p class="hint">★を付けたキャストの新しい「登場」報告をお知らせします。通知が重ならないよう同じキャスト・場所は20分間まとめます。</p><p class="hint">'+escapeHtml(pushSettingsText())+'</p>'+pushButton+'<p class="hint">iPhoneでアプリを閉じていても通知するには、Safariの共有からホーム画面に追加し、追加したOC TRACKERを開いて通知を許可してください。</p>'+(notificationHistory.length?'<div class="notice">最近の通知：'+escapeHtml(notificationHistory[0].text)+'</div>':'')+'</div>';
 }
 const getLocal=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}};
 const todayJst=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
@@ -78,7 +81,7 @@ function initialRecords(){
  ];
 }
 if(!Array.isArray(records)) records=liveRequested?[]:initialRecords();
-const state={tab:'map',day:DAYS.includes(todayJst())?todayJst():DAYS[0],selected:'photo-a',filter:'all',category:'all',castSearch:'',draftCast:'wilnas',favorite:getLocal(FAV_KEY,[]),zoom:1,posting:false,notificationsEnabled:getLocal(NOTIFY_KEY,false)};
+const state={tab:'map',day:DAYS.includes(todayJst())?todayJst():DAYS[0],selected:'photo-a',filter:'all',category:'all',castSearch:'',draftCast:'wilnas',favorite:getLocal(FAV_KEY,[]),zoom:1,posting:false,notificationsEnabled:getLocal(NOTIFY_KEY,false),pushStatus:'checking',pushBusy:false};
 function toast(message){const el=document.getElementById('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),3000)}
 function diffMinutes(iso){return Math.max(0,Math.floor((Date.now()-new Date(iso).getTime())/60000))}
 function ageLabel(iso){if(!iso)return '報告なし';const n=diffMinutes(iso);if(n<1)return 'たった今';if(n<60)return `${n}分前`;return `${Math.floor(n/60)}時間前`}
@@ -155,7 +158,7 @@ function subscribe(){if(channel&&api)api.removeChannel(channel);if(!api)return;
  for(const table of ['queue_reports','cast_reports','stage_reports'])channel.on('postgres_changes',{event:'INSERT',schema:'public',table,filter:`day=eq.${state.day}`,select:table==='cast_reports'?['id','day','area_code','cast_slug','status','created_at']:['id','day','area_code','status','created_at']},()=>fetchReports().catch(e=>toast('再取得に失敗：'+e.message)));
  channel.subscribe(status=>{if(status==='CHANNEL_ERROR'||status==='TIMED_OUT')toast('ライブ接続が不安定です。再読込で更新してください')});
 }
-async function boot(){if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{});if(liveRequested){try{const {createClient}=await import('https://esm.sh/@supabase/supabase-js@2.58.0');api=createClient(config.supabaseUrl,config.supabasePublishableKey,{auth:{persistSession:true,autoRefreshToken:true}});await fetchReports();mode='live';loadError='';subscribe();}catch(e){mode='offline';api=null;records=[];loadError=`Supabase接続エラー：${e.message}。安全のため報告操作を停止しています。`;}}render()}
+async function boot(){if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{});if(liveRequested){try{const {createClient}=await import('https://esm.sh/@supabase/supabase-js@2.58.0');api=createClient(config.supabaseUrl,config.supabasePublishableKey,{auth:{persistSession:true,autoRefreshToken:true}});await fetchReports();mode='live';loadError='';subscribe();refreshPushStatus();}catch(e){mode='offline';api=null;records=[];loadError=`Supabase接続エラー：${e.message}。安全のため報告操作を停止しています。`;}}render()}
 const app=document.getElementById('app');
 app.addEventListener('click',e=>{
  const b=e.target.closest('button');if(!b)return;
@@ -164,10 +167,12 @@ app.addEventListener('click',e=>{
  if(b.dataset.select){state.selected=b.dataset.select;render();if(matchMedia('(max-width:699px)').matches)document.getElementById('details')?.scrollIntoView({behavior:'smooth',block:'start'})}
  if(b.dataset.zoom){state.zoom=Math.min(1.9,Math.max(1,Math.round((state.zoom+(b.dataset.zoom==='in'?.25:-.25))*100)/100));const view=document.getElementById('map-viewport');const top=view?.scrollTop||0,left=view?.scrollLeft||0;render();document.getElementById('map-viewport').scrollTo(left,top)}
  if(b.dataset.category)switchCategory(b.dataset.category);
- if(b.dataset.favorite){const c=b.dataset.favorite;state.favorite=state.favorite.includes(c)?state.favorite.filter(x=>x!==c):[...state.favorite,c];localStorage.setItem(FAV_KEY,JSON.stringify(state.favorite));render()}
+ if(b.dataset.favorite){const c=b.dataset.favorite;const added=!state.favorite.includes(c);state.favorite=added?[...state.favorite,c]:state.favorite.filter(x=>x!==c);localStorage.setItem(FAV_KEY,JSON.stringify(state.favorite));render();syncFavoriteForPush(c,added)}
  if(b.dataset.report){const [source,status]=b.dataset.report.split(':');sendReport(source,status)}
  if(b.dataset.stageReport){state.selected='main-stage';sendReport('stage',b.dataset.stageReport)}
  if(b.dataset.action==='toggle-notifications')toggleFavoriteNotifications();
+ if(b.dataset.action==='push-enable')enablePush();
+ if(b.dataset.action==='push-disable')disablePush();
  if(b.dataset.action==='refresh'&&mode==='live'){fetchReports().then(()=>toast('最新の情報に更新しました')).catch(err=>toast('更新失敗：'+err.message))}
  if(b.dataset.action==='reset-demo'&&mode==='demo'){records=initialRecords();localStorage.setItem(LOCAL_KEY,JSON.stringify(records));render();toast('デモを初期化しました')}
 });
