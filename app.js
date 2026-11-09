@@ -98,7 +98,8 @@ async function refreshPushStatus(){
   const {data,error}=await api.from('oc_push_subscriptions').select('endpoint').eq('user_id',session.user.id).eq('endpoint',sub.endpoint).eq('test_only',TEST_MODE).maybeSingle();
   if(error)throw error;
   state.pushStatus=data?'on':'off';
- }catch{state.pushStatus='off'}finally{render()}
+  if(data)await syncFavoritesForPush(session.user);
+ }catch(e){state.pushStatus='off';toast('通知の再同期に失敗：'+(e?.message||e))}finally{render()}
 }
 async function enablePush(){
  if(state.pushBusy)return;
