@@ -83,8 +83,8 @@ async function syncFavoriteForPush(slug,added){
  if(!api||state.pushStatus!=='on')return;
  try{
   const {user}=await ensurePushUser();
-  const r=added?await api.from('oc_favorites').upsert({user_id:user.id,cast_slug:slug}):await api.from('oc_favorites').delete().eq('user_id',user.id).eq('cast_slug',slug);
-  if(r.error)throw r.error;
+  const r=added?await api.from('oc_favorites').insert({user_id:user.id,cast_slug:slug}):await api.from('oc_favorites').delete().eq('user_id',user.id).eq('cast_slug',slug);
+  if(r.error&&!(added&&r.error.code==='23505'))throw r.error;
  }catch(e){toast('推し通知の同期失敗：'+(e?.message||e))}
 }
 async function refreshPushStatus(){
